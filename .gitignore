@@ -1,0 +1,13 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+.venv/
+
+# System files
+.DS_Store
+
+# Raw Excel data (keep raw exports local if confidential)
+*.xlsx
