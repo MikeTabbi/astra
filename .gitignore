@@ -11,3 +11,9 @@ venv/
 
 # Raw Excel data (keep raw exports local if confidential)
 *.xlsx
+
+# Ignore generated output files
+parsed_output.csv
+cleaned_qpcr_data.csv
+*.csv
+!mock_data.csv  # Keep mock_data.csv tracked as your baseline blueprint
