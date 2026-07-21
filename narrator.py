@@ -1,6 +1,6 @@
 from ollama import Client
 
-# Zion pastes your ngrok URL here:
+#Paste ngrok URL here:
 client = Client()
 
 # Test call to your MacBook's Ollama instance
