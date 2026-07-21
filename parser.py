@@ -3,9 +3,12 @@ import numpy as np
 import logging
 
 def load_raw_data(file_path: str) -> pd.DataFrame:
-    if file_path.endswith(('.xlsx', '.xls')):
+    normalized_path = file_path.lower()
+    if normalized_path.endswith(('.xlsx', '.xls')):
         return pd.read_excel(file_path)
-    return pd.read_csv(file_path)
+    if normalized_path.endswith('.csv'):
+        return pd.read_csv(file_path)
+    raise ValueError(f"Unsupported file extension for {file_path}")
 
 
 def clean_qpcr_data(df: pd.DataFrame, target_gene: str = "C5") -> pd.DataFrame:
@@ -14,11 +17,11 @@ def clean_qpcr_data(df: pd.DataFrame, target_gene: str = "C5") -> pd.DataFrame:
 
     gene_col = "target_name" if "target_name" in df.columns else "gene"
     if gene_col in df.columns:
-        df = df[df[gene_col].astype(str).str.upper() == target_gene.upper()].copy()
+        df = df[df[gene_col].astype(str).str.strip().str.upper() == target_gene.upper()].copy()
 
     flag_cols = [c for c in df.columns if "flag" in c or "status" in c or "omit" in c]
     for col in flag_cols:
-        df = df[~df[col].astype(str).str.upper().isin(["NOAMP", "EXPFAIL", "TRUE", "1"])]
+        df = df[~df[col].astype(str).str.strip().str.upper().isin(["NOAMP", "EXPFAIL", "TRUE", "1"])]
 
     return df
 
@@ -31,16 +34,25 @@ def _get_series(df: pd.DataFrame, *names, default) -> pd.Series:
     return pd.Series(default, index=df.index)
 
 
-def normalize_to_schema(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_to_schema(df: pd.DataFrame, target_gene: str = "C5") -> pd.DataFrame:
     mapped_df = pd.DataFrame(index=df.index)
 
+    if "target_name" in df.columns:
+        gene_col = "target_name"
+    elif "gene" in df.columns:
+        gene_col = "gene"
+    else:
+        raise ValueError("Input data must contain either 'target_name' or 'gene' column")
+
+    df = df[df[gene_col].astype(str).str.strip().str.upper() == target_gene.upper()].copy()
+
     mapped_df['target_name'] = _get_series(df, 'target_name', 'gene', default='C5')
-    mapped_df['time_point'] = pd.to_numeric(_get_series(df, 'time_point', 'time', default=0), errors='coerce')
-    mapped_df['salinity'] = pd.to_numeric(_get_series(df, 'salinity', 'salt_ppt', default=0), errors='coerce')
+    mapped_df['time_point'] = pd.to_numeric(_get_series(df, 'time_point', 'time', default=np.nan), errors='coerce')
+    mapped_df['salinity'] = pd.to_numeric(_get_series(df, 'salinity', 'salt_ppt', default=np.nan), errors='coerce')
     mapped_df['fold_change_rq'] = pd.to_numeric(
-        _get_series(df, 'fold_change_rq', 'rq', 'cq', 'ct', default=0.0), errors='coerce'
+        _get_series(df, 'fold_change_rq', 'rq', default=np.nan), errors='coerce'
     )
-    mapped_df['variance_sd'] = pd.to_numeric(_get_series(df, 'variance_sd', 'sd', default=0.0), errors='coerce')
+    mapped_df['variance_sd'] = pd.to_numeric(_get_series(df, 'variance_sd', 'sd', default=np.nan), errors='coerce')
 
     mapped_df = mapped_df.dropna().reset_index(drop=True)
     return mapped_df

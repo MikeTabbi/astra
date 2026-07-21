@@ -16,4 +16,5 @@ venv/
 parsed_output.csv
 cleaned_qpcr_data.csv
 *.csv
-!mock_data.csv  # Keep mock_data.csv tracked as your baseline blueprint
+# Keep mock_data.csv tracked as your baseline blueprint
+!mock_data.csv
