@@ -9,5 +9,15 @@ venv/
 # System files
 .DS_Store
 
+# Local Claude Code project instructions
+CLAUDE.md
+
 # Raw Excel data (keep raw exports local if confidential)
 *.xlsx
+
+# Ignore generated output files
+parsed_output.csv
+cleaned_qpcr_data.csv
+*.csv
+# Keep mock_data.csv tracked as your baseline blueprint
+!mock_data.csv
