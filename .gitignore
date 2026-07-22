@@ -20,4 +20,4 @@ parsed_output.csv
 cleaned_qpcr_data.csv
 *.csv
 # Keep mock_data.csv tracked as your baseline blueprint
-!mock_data.csv
+!mock_data.csv.vscode/
