@@ -40,7 +40,7 @@ class NarrativeSummary(BaseModel):
     headline: str = Field(description="One-sentence biological takeaway.")
     trend_description: str = Field(description="How expression shifts across time and salinity.")
     peak_condition: str = Field(description="Time point and salinity level of strongest response.")
-    peak_time_point: int = Field(ge=1, le=7, description="Time point of peak fold change.")
+    peak_time_point: int = Field(ge=0, description="Time point of peak fold change in hours.")
     peak_salinity: str = Field(description="Salinity level of peak fold change (Low, Med, or High).")
     direction: str = Field(description="One of: upregulation, transcriptional collapse, mixed, flat.")
     confidence_note: str = Field(description="Caveats given technical replicate variance.")
@@ -146,22 +146,29 @@ def build_matrix(df: pd.DataFrame) -> pd.DataFrame:
 
 def compute_facts(df: pd.DataFrame, target_gene: str) -> dict:
     """Precompute the numbers so the model narrates facts instead of doing arithmetic."""
-    peak_row = df.loc[df["fold_change_rq"].idxmax()]
-    trough_row = df.loc[df["fold_change_rq"].idxmin()]
+    matrix = build_matrix(df)
+    stacked = matrix.stack()
+    peak_idx = stacked.idxmax()
+    trough_idx = stacked.idxmin()
+    peak_fold_change = float(stacked.max())
+    min_fold_change = float(stacked.min())
     upregulated = int((df["fold_change_rq"] > 1.0).sum())
     collapsed = int((df["fold_change_rq"] < 1.0).sum())
+
+    peak_salinity, peak_time_point = peak_idx
+    min_salinity, min_time_point = trough_idx
 
     return {
         "target_gene": target_gene,
         "row_count": len(df),
         "time_points": sorted(df["time_point"].unique().tolist()),
         "salinity_levels": [s for s in SALINITY_LEVELS if s in set(df["salinity"])],
-        "peak_fold_change": round(float(peak_row["fold_change_rq"]), 3),
-        "peak_time_point": int(peak_row["time_point"]),
-        "peak_salinity": str(peak_row["salinity"]),
-        "min_fold_change": round(float(trough_row["fold_change_rq"]), 3),
-        "min_time_point": int(trough_row["time_point"]),
-        "min_salinity": str(trough_row["salinity"]),
+        "peak_fold_change": round(peak_fold_change, 3),
+        "peak_time_point": int(peak_time_point),
+        "peak_salinity": str(peak_salinity),
+        "min_fold_change": round(min_fold_change, 3),
+        "min_time_point": int(min_time_point),
+        "min_salinity": str(min_salinity),
         "mean_fold_change": round(float(df["fold_change_rq"].mean()), 3),
         "wells_upregulated": upregulated,
         "wells_collapsed": collapsed,
