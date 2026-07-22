@@ -9,6 +9,9 @@ venv/
 # System files
 .DS_Store
 
+# Local Claude Code project instructions
+CLAUDE.md
+
 # Raw Excel data (keep raw exports local if confidential)
 *.xlsx
 
