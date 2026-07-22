@@ -43,7 +43,6 @@ def generate_narration_with_self_consistency(matrix_data: dict) -> dict:
         logger.error("Summary Validation Failed: %s", e)
         raise
 
->>>>>>> 488739b8e6499ee2b88dbaa1cb6a839bc8600ca7
 
 if __name__ == "__main__":
     # 1. Generate the data (Mike's Logic)
