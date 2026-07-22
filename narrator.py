@@ -17,10 +17,10 @@ client = Client(host=HOST_URL)
 # my schema (Mike)for the synthetic data
 class SyntheticDataPoint(BaseModel):
     target_name: Literal["C5"] = Field(default="C5")
-    time_point: float
-    salinity: float
-    fold_change_rq: float
-    variance_sd: float
+    time_point: float = Field(ge=0)
+    salinity: float = Field(ge=0)
+    fold_change_rq: float = Field(ge=0)
+    variance_sd: float = Field(ge=0)
 
 class SyntheticTrajectory(BaseModel):
     samples: list[SyntheticDataPoint]
@@ -30,7 +30,7 @@ class Summ(BaseModel):
     target_name: str
     upregulated: bool
     peak_time: float
-    confidence: str
+    confidence: Literal["Low", "Medium", "High"]
 
 
 # function to generate synthetic data using the Ollama API
@@ -52,6 +52,10 @@ def generate_synthetic_data(num_samples: int = 10, output_file: str = "synthetic
 
     try:
         parsed_data = SyntheticTrajectory.model_validate_json(response['message']['content'])
+        if len(parsed_data.samples) != num_samples:
+            raise ValueError(
+                f"Expected {num_samples} samples, got {len(parsed_data.samples)} from model response"
+            )
         df = pd.DataFrame([sample.model_dump() for sample in parsed_data.samples])
         df.to_csv(output_file, index=False)
         logger.info("Exported %d synthetic rows to %s", len(df), output_file)
@@ -83,7 +87,7 @@ def analyze_trajectory(df: pd.DataFrame) -> dict:
         return summary.model_dump()
     except ValidationError as e:
         logger.error("Summary Validation Failed: %s", e)
-        return {}
+        raise
 
 
 if __name__ == "__main__":
