@@ -17,6 +17,7 @@ class Summ(BaseModel):
     peak_time: int
     confidence: str
 
+<<<<<<< HEAD
 def prompt_builder(matrix_data: dict) -> str:
     "Matrix output is the data form grid.py"
 
@@ -90,6 +91,39 @@ def generate_narration_with_self_consistency(matrix_data: dict) -> dict:
         "representative_summary": successful_runs[0].trend_summary,
         "all_run_outputs": [r.model_dump() for r in successful_runs],
     }
+=======
+def generate_narration_with_self_consistency(matrix_data: dict) -> dict:
+    """
+    Prompts the local Ollama model to analyze the qPCR matrix and forces 
+    the output to match the strict Pydantic Summ schema.
+    """
+    prompt = (
+        "Analyze the following qPCR time-series matrix. "
+        f"Data: {json.dumps(matrix_data)}\n"
+        "Return a JSON object containing the target_name, a boolean indicating if it was upregulated, "
+        "the time_point (int) where the fold change peaked, and a confidence string ('Low', 'Medium', 'High')."
+    )
+
+    try:
+        # The format parameter forces Ollama to output valid JSON matching the Pydantic schema
+        response = client.chat(
+            model='qwen2.5-coder:7b',
+            messages=[{'role': 'user', 'content': prompt}],
+            format=Summ.model_json_schema()
+        )
+        
+        # Validate the AI's string response back through Pydantic to ensure no hallucinations
+        raw_output = response['message']['content']
+        validated_summary = Summ.model_validate_json(raw_output)
+        
+        return validated_summary.model_dump()
+        
+    except ValidationError as e:
+        print("Schema Validation Failed. The model hallucinated the format.")
+        print(e)
+        return {}
+
+>>>>>>> 488739b8e6499ee2b88dbaa1cb6a839bc8600ca7
 
 #Smoke Test
 if __name__ == "__main__":
