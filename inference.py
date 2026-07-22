@@ -12,7 +12,7 @@ from ollama import Client
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://192.168.1.100:11434")
+DEFAULT_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
 
 
