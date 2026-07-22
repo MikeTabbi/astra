@@ -1,55 +1,70 @@
 import logging
 import pandas as pd
-import json
 from typing import Literal
 from ollama import Client
 from pydantic import BaseModel, Field, ValidationError
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
 
-HOST_URL = "http://127.0.0.1:11434"
-NGROK_URL = ""
-client = Client(host=HOST_URL) #local ollama host for now
+MODEL_NAME = "qwen2.5-coder:7b"
 
-class Summ(BaseModel):
-    target_name: str
-    upregulated: bool
-    peak_time: int
-    confidence: str
 
-def generate_narration_with_self_consistency(matrix_data: dict) -> dict:
+class SyntheticDataPoint(BaseModel):
+    target_name: Literal["C5"] = Field(default="C5")
+    time_point: float
+    salinity: float
+    fold_change_rq: float
+    variance_sd: float
+
+
+class SyntheticTrajectory(BaseModel):
+    samples: list[SyntheticDataPoint]
+
+
+def generate_synthetic_data(num_samples: int = 10, output_file: str = "synthetic_data.csv") -> pd.DataFrame:
+    if num_samples <= 0:
+        raise ValueError("num_samples must be a positive integer")
+
+    client = Client()
+
+    prompt = f"""
+    Generate {num_samples} realistic synthetic data rows for a qPCR biological experiment tracking the C5 gene.
+    Vary time_point (e.g. 0, 6, 12, 24, 48 hrs), salinity (e.g. 15 to 45 ppt), fold_change_rq, and variance_sd.
+    Return ONLY valid JSON matching this schema:
+    {{
+      "samples": [
+        {{"target_name": "C5", "time_point": 12.0, "salinity": 30.0, "fold_change_rq": 1.85, "variance_sd": 0.12}}
+      ]
+    }}
     """
-    Prompts the local Ollama model to analyze the qPCR matrix and forces 
-    the output to match the strict Pydantic Summ schema.
-    """
-    prompt = (
-        "Analyze the following qPCR time-series matrix. "
-        f"Data: {json.dumps(matrix_data)}\n"
-        "Return a summary containing the target_name, a boolean indicating if it was upregulated, "
-        "the time_point where the fold change peaked, and a confidence string ('Low', 'Medium', 'High')."
-    )
 
-    logger.info("Analyzing trajectory to generate summary...")
+    logger.info("Generating %d synthetic rows using %s", num_samples, MODEL_NAME)
 
     response = client.chat(
         model=MODEL_NAME,
         messages=[{'role': 'user', 'content': prompt}],
-        format=Summ.model_json_schema()
+        format="json",
     )
 
+    content = response['message']['content']
+
     try:
-        summary = Summ.model_validate_json(response['message']['content'])
-        return summary.model_dump()
+        parsed_data = SyntheticTrajectory.model_validate_json(content)
     except ValidationError as e:
-        logger.error("Summary Validation Failed: %s", e)
+        logger.error("Model returned data that failed schema validation: %s", e)
+        logger.debug("Raw content was: %s", content)
         raise
+
+    if len(parsed_data.samples) != num_samples:
+        raise ValueError(f"Expected {num_samples} samples, got {len(parsed_data.samples)}")
+
+    df = pd.DataFrame([sample.model_dump() for sample in parsed_data.samples])
+
+    df.to_csv(output_file, index=False)
+    logger.info("Exported %d synthetic rows to %s", len(df), output_file)
+    return df
 
 
 if __name__ == "__main__":
-    # 1. Generate the data (Mike's Logic)
-    synthetic_df = generate_synthetic_data(num_samples=5)
-    
-    # 2. Analyze the data (Zion's Logic)
-    summary_output = analyze_trajectory(synthetic_df)
-    
-    print("\n--- Final Analytical Summary ---")
-    print(json.dumps(summary_output, indent=2))
+    generate_synthetic_data(num_samples=10)
