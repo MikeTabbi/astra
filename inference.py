@@ -19,7 +19,9 @@ DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
 class InferenceProvider(Protocol):
     """Backend-agnostic inference contract (spec Stage 3)."""
 
-    def complete_json(self, prompt: str, temperature: float = 0.2) -> str:
+    def complete_json(
+        self, prompt: str, temperature: float = 0.2, schema: Optional[dict] = None
+    ) -> str:
         """Return raw JSON text from the model. Caller validates with Pydantic."""
         ...
 
@@ -50,11 +52,13 @@ class OllamaProvider:
             ) from exc
         logger.info("Connected to Ollama node at %s (model=%s)", self.host, self.model)
 
-    def complete_json(self, prompt: str, temperature: float = 0.2) -> str:
+    def complete_json(
+        self, prompt: str, temperature: float = 0.2, schema: Optional[dict] = None
+    ) -> str:
         response: Any = self._client.chat(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
-            format="json",
+            format=schema if schema is not None else "json",
             options={"temperature": temperature},
         )
         try:
@@ -70,7 +74,9 @@ class BedrockProvider:
         self.model_id = model_id
         self.region = region
 
-    def complete_json(self, prompt: str, temperature: float = 0.2) -> str:
+    def complete_json(
+        self, prompt: str, temperature: float = 0.2, schema: Optional[dict] = None
+    ) -> str:
         raise NotImplementedError("Bedrock backend lands in the Weeks 5-6 migration.")
 
 

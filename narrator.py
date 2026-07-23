@@ -87,7 +87,25 @@ _DEFAULT_CHAINS = {
         "Interpretation rules: RQ > 1.0 indicates upregulation; RQ < 1.0 indicates "
         "transcriptional collapse. Report peak_time_point and peak_salinity exactly "
         "as given in the precomputed facts.\n\n"
-        "Return ONLY valid JSON matching this schema:\n{schema}\n"
+        "Return ONLY valid JSON in exactly this shape (example values shown -- "
+        "replace with your own facts):\n"
+        "{{\n"
+        '  "headline": "C5 expression rises sharply under high salinity stress.",\n'
+        '  "trend_description": "Fold change increases steadily across all salinity '
+        'levels from time point 1 to 7, with the steepest rise under High salinity.",\n'
+        '  "peak_condition": "Time point 7 under High salinity",\n'
+        '  "peak_time_point": 7,\n'
+        '  "peak_salinity": "High",\n'
+        '  "direction": "upregulation",\n'
+        '  "confidence_note": "Variance is low at early time points but grows by '
+        'time point 7; treat the peak magnitude as an estimate.",\n'
+        '  "key_observations": [\n'
+        '    "Low salinity shows a mild, roughly linear increase in fold change.",\n'
+        '    "Med and High salinity show accelerating expression over time.",\n'
+        '    "The largest fold change occurs at the final time point under High '
+        'salinity."\n'
+        "  ]\n"
+        "}}\n"
         "No markdown fences, no prose outside the JSON object."
     ),
     "adversarial": (
@@ -100,7 +118,23 @@ _DEFAULT_CHAINS = {
         "condition is called the peak, whether expression is described as rising or "
         "falling, and any numeric values cited.\n\n"
         "Be skeptical. If the summaries genuinely agree, say so plainly.\n\n"
-        "Return ONLY valid JSON matching this schema:\n{schema}\n"
+        "Return ONLY valid JSON in exactly this shape (example values shown -- "
+        "replace with your own findings):\n"
+        "{{\n"
+        '  "contradictions_found": true,\n'
+        '  "contradiction_details": [\n'
+        '    "Summary 2 calls time point 5 the peak while Summary 4 calls time '
+        'point 7 the peak."\n'
+        "  ],\n"
+        '  "numerical_disagreements": [\n'
+        '    "Summary 3 cites a fold change of 9.8 at High salinity, time point 7, '
+        'while the ground truth is 12.11."\n'
+        "  ],\n"
+        '  "consensus_summary": "All summaries agree that expression rises with '
+        'both time and salinity and that High salinity shows the strongest '
+        'response.",\n'
+        '  "manual_review_recommended": true\n'
+        "}}\n"
         "No markdown fences, no prose outside the JSON object."
     ),
 }
@@ -201,12 +235,13 @@ def narrate(
         target_gene=target_gene,
         matrix=build_matrix(df).round(3).to_string(),
         stats=_format_facts(facts),
-        schema=json.dumps(NarrativeSummary.model_json_schema(), indent=2),
     )
 
     last_error: Optional[Exception] = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        content = provider.complete_json(prompt, temperature=temperature)
+        content = provider.complete_json(
+            prompt, temperature=temperature, schema=NarrativeSummary.model_json_schema()
+        )
         try:
             return NarrativeSummary.model_validate_json(content)
         except ValidationError as exc:
@@ -258,11 +293,12 @@ def adversarial_review(
         target_gene=target_gene,
         stats=_format_facts(facts),
         summaries=rendered,
-        schema=json.dumps(ContradictionReport.model_json_schema(), indent=2),
     )
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        content = provider.complete_json(prompt, temperature=0.0)
+        content = provider.complete_json(
+            prompt, temperature=0.0, schema=ContradictionReport.model_json_schema()
+        )
         try:
             return ContradictionReport.model_validate_json(content)
         except ValidationError as exc:
