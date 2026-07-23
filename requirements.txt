@@ -1,0 +1,6 @@
+pandas
+numpy
+openpyxl
+xlrd
+pydantic
+ollama

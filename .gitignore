@@ -14,6 +14,7 @@ CLAUDE.md
 
 # Raw Excel data (keep raw exports local if confidential)
 *.xlsx
+*.xls
 
 # Ignore generated output files
 parsed_output.csv
