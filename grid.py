@@ -1,41 +1,29 @@
-
-import pandas as pd
 import matplotlib.colors as mcolors
+import pandas as pd
 
-def create_pivot_matrix(df: pd.DataFrame, index_col: str, columns_col: str, value_col: str = 'fold_change_rq') -> pd.DataFrame:
-    """
-    Generates a programmatic pivot table mapping multi-variable parameters[cite: 1].
-    Averages nested replicate samples per intersection[cite: 1].
-    """
+
+def create_expression_matrix(df, row_axis="salinity", col_axis="time_point"):
+    """Pivots normalized dataframe and averages nested RQ values[cite: 1]."""
     return df.pivot_table(
-        index=index_col,
-        columns=columns_col,
-        values=value_col,
-        aggfunc='mean'
+        index=row_axis,
+        columns=col_axis,
+        values="fold_change_rq",
+        aggfunc="mean",
     )
 
-def rq_to_hex_color(val: float, min_val: float = 0.0, mid_val: float = 1.0, max_val: float = 19.0) -> str:
-    """
-    Maps RQ values to CSS hex colors[cite: 1]:
-    - RQ < 1.0 (Downregulation / Transcriptional collapse): Blue scale[cite: 1]
-    - RQ == 1.0 (Baseline): White (#FFFFFF)[cite: 1]
-    - RQ > 1.0 (Upregulation): Red scale up to max value (e.g., 19.0)[cite: 1]
-    """
-    if pd.isna(val):
-        return "#E0E0E0"
 
-    down_cmap = mcolors.LinearSegmentedColormap.from_list("down", ["#2B83BA", "#FFFFFF"])
-    up_cmap = mcolors.LinearSegmentedColormap.from_list("up", ["#FFFFFF", "#D7191C"])
+def get_css_color(value, vmin=0.0, vmax=19.0):
+    """Maps numerical RQ value to CSS hex color code across threshold scale[cite: 1]."""
+    if pd.isna(value):
+        return "#FFFFFF"
 
-    if val <= mid_val:
-        norm = max(0.0, (val - min_val) / (mid_val - min_val)) if mid_val > min_val else 0.0
-        return mcolors.to_hex(down_cmap(norm))
-    else:
-        norm = min(1.0, (val - mid_val) / (max_val - mid_val)) if max_val > mid_val else 1.0
-        return mcolors.to_hex(up_cmap(norm))
+    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+    cmap = mcolors.LinearSegmentedColormap.from_list(
+        "rq_scale", ["#2b83ba", "#ffffff", "#d7191c"]
+    )
+    return mcolors.to_hex(cmap(norm(value))[:3])
 
-def apply_grid_color_mapping(pivot_df: pd.DataFrame, max_rq: float = 19.0) -> pd.DataFrame:
-    """
-    Applies mathematical threshold scaling to assign CSS hex color codes across the matrix[cite: 1].
-    """
-    return pivot_df.applymap(lambda val: rq_to_hex_color(val, max_val=max_rq))
+
+def generate_color_mapped_grid(matrix):
+    """Transforms analytical matrix into corresponding CSS hex color grid[cite: 1]."""
+    return matrix.applymap(get_css_color)
