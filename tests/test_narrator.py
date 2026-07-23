@@ -24,7 +24,7 @@ def _parser_output() -> pd.DataFrame:
             "target_name": ["C5", "C5", "C5"],
             "time_point": [24, 24, 24],
             "salinity": ["High", "Low", "Control"],
-            "fold_change_rq": [4.0, 18.0, 3.5],
+            "fold_change_rq": [4.0, 18.346271514892578, 3.5],
             "variance_sd": [0.4, 0.2, 0.3],
         }
     )
@@ -43,7 +43,7 @@ def _valid_summary(**overrides: Any) -> dict[str, Any]:
         ),
         "peak_time_point": 24,
         "peak_salinity": "Low",
-        "peak_fold_change_rq": 18.0,
+        "peak_fold_change_rq": 18.346,
         "confidence_note": (
             "This small descriptive dataset does not establish significance "
             "or causality."
@@ -125,7 +125,27 @@ class NarratorTests(unittest.TestCase):
 
         self.assertEqual(provider.calls, 2)
         self.assertEqual(result.peak_salinity, "Low")
-        self.assertEqual(result.peak_fold_change_rq, 18.0)
+        self.assertEqual(result.peak_fold_change_rq, 18.346)
+
+    def test_narrate_retries_unsupported_significance_claim(self) -> None:
+        provider = FakeProvider(
+            [
+                _valid_summary(
+                    headline="C5 was significantly increased in Low.",
+                ),
+                _valid_summary(),
+            ]
+        )
+
+        result = astra_narrator.narrate(
+            _parser_output(),
+            provider=provider,
+        )
+
+        self.assertEqual(provider.calls, 2)
+        self.assertNotIn("significant", result.headline.casefold())
+        self.assertIn("Low", result.peak_condition)
+        self.assertIn("no statistical significance", result.confidence_note)
 
     def test_consistency_report_uses_structured_peak_agreement(self) -> None:
         provider = FakeProvider([_valid_summary() for _ in range(5)])

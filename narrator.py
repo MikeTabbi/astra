@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import os
+import re
 import statistics
 import sys
 from pathlib import Path
@@ -33,14 +34,25 @@ PathLike = Union[str, Path]
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-DEFAULT_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://192.168.1.100:11434")
-DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
+DEFAULT_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "llama3:latest")
 DEFAULT_INPUT_FILE = Path("parsed_output.csv")
 DEFAULT_OUTPUT_FILE = Path("consistency_report.json")
 PROMPT_CHAINS_PATH = Path(__file__).with_name("prompt_chains.json")
 
 MAX_ATTEMPTS = 2
 CONSISTENCY_RUNS = 5
+PEAK_RQ_ABS_TOLERANCE = 0.001
+UNSUPPORTED_CLAIM_PATTERNS = {
+    r"\bsignificant(?:ly)?\b": "hypothesis-test language is unsupported",
+    r"\bstatistically\b": "hypothesis-test language is unsupported",
+    r"\bcaus(?:e|es|ed|ing)\b": "causality is not established",
+    r"\bleads? to\b": "causality is not established",
+    r"\bin response to\b": "causality is not established",
+    r"\bsingle replicate\b": (
+        "the parser output does not establish the biological replicate count"
+    ),
+}
 
 PARSER_SCHEMA_COLUMNS = [
     "target_name",
@@ -213,14 +225,20 @@ def load_prompt_chains(path: Path = PROMPT_CHAINS_PATH) -> dict[str, str]:
     return {
         "narrate": (
             "You are a cautious molecular-biology data narrator. Summarize only "
-            "the measurements supplied for {target_gene}; do not infer causality, "
-            "statistical significance, future behavior, or unmeasured biology.\n\n"
+            "the measurements supplied for {target_gene}. Use only descriptive "
+            "comparisons supported by the supplied numbers. Do not claim "
+            "hypothesis-test results, causality, future behavior, or unmeasured "
+            "biology.\n\n"
             "ASTRA parser data contract:\n"
             "- time_point is the experimental time value supplied by the researcher.\n"
             "- salinity is a categorical condition label such as Low, High, or "
             "Control. It is NOT a numeric ppt measurement.\n"
             "- fold_change_rq is relative expression.\n"
             "- variance_sd is technical-replicate standard deviation.\n\n"
+            "Each row is a cleaned sample-level result after parser QC and "
+            "technical-replicate aggregation. Say 'higher measured fold change' "
+            "or 'lower measured fold change' when comparing values. Do not infer "
+            "a biological-replicate count.\n\n"
             "Clean parser output:\n{data_table}\n\n"
             "Deterministic facts calculated in Python:\n{stats}\n\n"
             "Your structured peak fields must exactly match the deterministic peak. "
@@ -365,7 +383,7 @@ def _summarize_dataframe(
     facts = compute_dataset_facts(dataframe, target_gene=target_gene)
     time_values = ", ".join(_display_number(value) for value in facts.time_points)
     conditions = ", ".join(facts.salinity_conditions)
-    return (
+    lines = [
         f"- target_name: {facts.target_name}\n"
         f"- accepted rows: {facts.row_count}\n"
         f"- measured time_point value(s): {time_values}\n"
@@ -377,7 +395,22 @@ def _summarize_dataframe(
         f"time_point={_display_number(facts.peak_time_point)}, "
         f"salinity={facts.peak_salinity}\n"
         f"- mean variance_sd: {facts.variance_sd_mean:.3f}\n"
-    )
+    ]
+    if len(facts.time_points) == 1:
+        lines.append(
+            "- temporal coverage: only one measured time point; no time-course "
+            "trend can be inferred\n"
+        )
+
+    data = validate_parser_dataframe(dataframe, target_gene=target_gene)
+    for condition, group in data.groupby("salinity", sort=True):
+        lines.append(
+            f"- condition {condition}: rows={len(group)}, "
+            f"mean fold_change_rq={group['fold_change_rq'].mean():.3f}, "
+            f"range={group['fold_change_rq'].min():.3f} to "
+            f"{group['fold_change_rq'].max():.3f}\n"
+        )
+    return "".join(lines)
 
 
 def build_prompt(
@@ -424,23 +457,61 @@ def _validate_summary_facts(
     if not math.isclose(
         float(summary.peak_fold_change_rq),
         facts.peak_fold_change_rq,
-        rel_tol=1e-6,
-        abs_tol=1e-6,
+        rel_tol=0,
+        abs_tol=PEAK_RQ_ABS_TOLERANCE,
     ):
         errors.append(
             f"peak_fold_change_rq={summary.peak_fold_change_rq}, "
             f"expected {facts.peak_fold_change_rq}"
-        )
-    if facts.peak_salinity.casefold() not in summary.peak_condition.casefold():
-        errors.append(
-            "peak_condition does not name the measured peak condition "
-            f"{facts.peak_salinity!r}"
         )
     if " ppt" in summary.as_text().casefold():
         errors.append("narrative treats categorical salinity labels as numeric ppt")
 
     if errors:
         raise ValueError("Narrative factual validation failed: " + "; ".join(errors))
+
+
+def _normalize_deterministic_fields(
+    summary: NarrativeSummary,
+    facts: DatasetFacts,
+) -> NarrativeSummary:
+    """Replace factual prose fields with values calculated directly in Python."""
+    summary.peak_condition = (
+        f"The strongest measured C5 response was "
+        f"{facts.peak_fold_change_rq:.3f} in the {facts.peak_salinity} condition "
+        f"at time point {_display_number(facts.peak_time_point)}."
+    )
+    coverage = (
+        "Only one time point is represented, so this report cannot describe a "
+        "time-course trend. "
+        if len(facts.time_points) == 1
+        else ""
+    )
+    summary.confidence_note = (
+        f"{coverage}The report is descriptive: variance_sd reflects technical-"
+        "replicate spread, and no statistical significance or causality was tested."
+    )
+    return summary
+
+
+def _validate_narrative_language(summary: NarrativeSummary) -> None:
+    """Reject confident scientific claims that the parser output cannot support."""
+    generated_text = " ".join(
+        [
+            summary.headline,
+            summary.trend_description,
+            *summary.key_observations,
+        ]
+    ).casefold()
+    violations = [
+        explanation
+        for pattern, explanation in UNSUPPORTED_CLAIM_PATTERNS.items()
+        if re.search(pattern, generated_text)
+    ]
+    if violations:
+        raise ValueError(
+            "Unsupported narrative claim(s): " + "; ".join(sorted(set(violations)))
+        )
 
 
 def narrate(
@@ -458,10 +529,11 @@ def narrate(
     prompt = build_prompt(data, target_gene)
     schema = NarrativeSummary.model_json_schema()
     last_error: Optional[Exception] = None
+    attempt_prompt = prompt
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         content = provider.generate_narration(
-            prompt=prompt,
+            prompt=attempt_prompt,
             schema=schema,
             model=model,
             temperature=temperature,
@@ -469,7 +541,8 @@ def narrate(
         try:
             summary = NarrativeSummary.model_validate_json(content)
             _validate_summary_facts(summary, facts)
-            return summary
+            _validate_narrative_language(summary)
+            return _normalize_deterministic_fields(summary, facts)
         except (ValidationError, ValueError) as exc:
             last_error = exc
             logger.warning(
@@ -477,6 +550,11 @@ def narrate(
                 attempt,
                 MAX_ATTEMPTS,
                 exc,
+            )
+            attempt_prompt = (
+                f"{prompt}\n\nCORRECTION REQUIRED: The previous response was "
+                f"rejected because {exc}. Return a corrected JSON response that "
+                "uses only descriptive, non-causal language."
             )
 
     raise ValueError(

@@ -74,9 +74,13 @@ Set the Ollama host and model with environment variables when needed:
 
 ```bash
 export OLLAMA_HOST=http://HOST_MACHINE_IP:11434
-export OLLAMA_MODEL=qwen2.5-coder:7b
+export OLLAMA_MODEL=llama3:latest
 python narrator.py
 ```
+
+By default, the narrator connects to Ollama on the same computer at
+`http://127.0.0.1:11434`. Set `OLLAMA_HOST` only when Ollama is running on a
+different team computer.
 
 The report's reliability rating measures generation consistency only. It is not
 a statistical confidence score or a substitute for biological review.
