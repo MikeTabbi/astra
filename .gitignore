@@ -33,3 +33,6 @@ datasets/grids/*.json
 
 # Generated synthetic-data reports stay local
 datasets/synthetic/*.json
+
+# Recoverable local run backups are not source code
+.run_backups/
