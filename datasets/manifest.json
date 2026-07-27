@@ -1,0 +1,19 @@
+{
+  "time_unit": "hours after stress",
+  "datasets": [
+    {
+      "name": "uspt_sb1_week1",
+      "input": "raw/USPT SB1 07222026_data.xls",
+      "target": "SB1",
+      "time_point": 168,
+      "output": "parsed/uspt_sb1_week1.csv"
+    },
+    {
+      "name": "uspt_p2_week1",
+      "input": "raw/USPT P2 07212026_data.xls",
+      "target": "Phvul.001G136100",
+      "time_point": 168,
+      "output": "parsed/uspt_p2_week1.csv"
+    }
+  ]
+}

@@ -16,14 +16,16 @@ Pipeline:
 
 For the current QuantStudio workbook, ``Ct SD`` is the closest available
 technical-replicate dispersion field and is mapped to ``variance_sd``. The
-workbook does not contain an experiment time point, so callers must supply one
-with ``time_point=...`` or ``--time-point``.
+workbooks do not contain experiment time points, so the no-argument workflow
+reads them from ``datasets/manifest.json``. Single-file callers can instead use
+``time_point=...`` or ``--time-point``.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import re
 import sys
@@ -41,7 +43,9 @@ PathLike = Union[str, Path]
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-DEFAULT_INPUT_FILE = "lab_data.xls"
+PROJECT_ROOT = Path(__file__).resolve().parent
+DEFAULT_MANIFEST_FILE = PROJECT_ROOT / "datasets" / "manifest.json"
+DEFAULT_SINGLE_OUTPUT_FILE = Path("parsed_output.csv")
 DEFAULT_RESULTS_SHEET = "Results"
 DEFAULT_SETUP_SHEET = "Sample Setup"
 
@@ -57,7 +61,9 @@ _NULL_TOKENS = {
 }
 
 _QC_COLUMNS = {
+    "ampnc",
     "highsd",
+    "mtp",
     "noamp",
     "outlierrg",
     "expfail",
@@ -146,6 +152,26 @@ class ParserResult:
 
     data: pd.DataFrame
     rejected: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class DatasetJob:
+    """One manifest-defined parser run."""
+
+    name: str
+    input_file: Path
+    target_gene: str
+    time_point: float
+    output_file: Path
+    rejected_output_file: Path
+
+
+@dataclass
+class DatasetJobResult:
+    """Files and accepted rows produced by one manifest job."""
+
+    job: DatasetJob
+    data: pd.DataFrame
 
 
 def _normalize_column_name(name: object) -> str:
@@ -820,6 +846,96 @@ def process_qpcr_data(
     return ParserResult(data=data, rejected=rejected)
 
 
+def load_dataset_jobs(
+    manifest_file: PathLike = DEFAULT_MANIFEST_FILE,
+) -> list[DatasetJob]:
+    """Load the datasets that ``python parser.py`` should process."""
+    manifest_path = Path(manifest_file)
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"Dataset manifest not found: {manifest_path}. "
+            "Create datasets/manifest.json or provide an input filename."
+        )
+
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Dataset manifest is not valid JSON: {manifest_path}"
+        ) from exc
+
+    entries = payload.get("datasets") if isinstance(payload, dict) else None
+    if not isinstance(entries, list) or not entries:
+        raise ValueError(
+            f"{manifest_path} must contain a non-empty 'datasets' list"
+        )
+
+    manifest_directory = manifest_path.parent
+    jobs: list[DatasetJob] = []
+    seen_names: set[str] = set()
+    for position, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"Dataset entry {position} must be a JSON object")
+
+        missing = [
+            field
+            for field in ("name", "input", "target", "time_point")
+            if field not in entry
+        ]
+        if missing:
+            raise ValueError(
+                f"Dataset entry {position} is missing: {', '.join(missing)}"
+            )
+
+        name = str(entry["name"]).strip()
+        if not name or not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+            raise ValueError(
+                f"Dataset entry {position} has an invalid name {name!r}; "
+                "use letters, numbers, underscores, or hyphens"
+            )
+        if name.casefold() in seen_names:
+            raise ValueError(f"Dataset name appears more than once: {name}")
+        seen_names.add(name.casefold())
+
+        target_gene = str(entry["target"]).strip()
+        if not target_gene:
+            raise ValueError(f"Dataset '{name}' has a blank target")
+
+        try:
+            time_point = float(entry["time_point"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Dataset '{name}' has a non-numeric time_point"
+            ) from exc
+        if not np.isfinite(time_point) or time_point < 0:
+            raise ValueError(
+                f"Dataset '{name}' time_point must be finite and non-negative"
+            )
+
+        input_file = manifest_directory / str(entry["input"])
+        output_file = manifest_directory / str(
+            entry.get("output", f"parsed/{name}.csv")
+        )
+        rejected_output_file = manifest_directory / str(
+            entry.get(
+                "rejected_output",
+                f"parsed/{output_file.stem}_rejected.csv",
+            )
+        )
+        jobs.append(
+            DatasetJob(
+                name=name,
+                input_file=input_file,
+                target_gene=target_gene,
+                time_point=time_point,
+                output_file=output_file,
+                rejected_output_file=rejected_output_file,
+            )
+        )
+
+    return jobs
+
+
 def run_pipeline(
     input_file: PathLike,
     output_file: PathLike = "cleaned_qpcr_data.csv",
@@ -885,25 +1001,52 @@ def run_pipeline(
     return result.data
 
 
+def run_dataset_manifest(
+    manifest_file: PathLike = DEFAULT_MANIFEST_FILE,
+    *,
+    results_sheet: str = DEFAULT_RESULTS_SHEET,
+    setup_sheet: Optional[str] = DEFAULT_SETUP_SHEET,
+    aggregate_replicates: bool = True,
+    allow_empty: bool = False,
+) -> list[DatasetJobResult]:
+    """Process every dataset configured for the no-argument workflow."""
+    results: list[DatasetJobResult] = []
+    for job in load_dataset_jobs(manifest_file):
+        logger.info("Processing configured dataset '%s'", job.name)
+        data = run_pipeline(
+            input_file=job.input_file,
+            output_file=job.output_file,
+            target_gene=job.target_gene,
+            time_point=job.time_point,
+            results_sheet=results_sheet,
+            setup_sheet=setup_sheet,
+            rejected_output_file=job.rejected_output_file,
+            aggregate_replicates=aggregate_replicates,
+            allow_empty=allow_empty,
+        )
+        results.append(DatasetJobResult(job=job, data=data))
+    return results
+
+
 def _default_rejection_path(output_file: PathLike) -> Path:
     output_path = Path(output_file)
     return output_path.with_name(f"{output_path.stem}_rejected.csv")
 
 
-def _prompt_for_default_workbook_time_point(
+def _prompt_for_workbook_time_point(
     input_file: PathLike,
     time_point: Optional[float],
 ) -> Optional[float]:
-    """Prompt for metadata absent from the default lab workbook in a terminal."""
+    """Prompt for workbook metadata when an explicit single-file run needs it."""
     if (
         time_point is not None
-        or Path(input_file).name != DEFAULT_INPUT_FILE
+        or Path(input_file).suffix.lower() not in {".xls", ".xlsx"}
         or not sys.stdin.isatty()
     ):
         return time_point
 
     entered = input(
-        "lab_data.xls does not contain an experiment time point. "
+        f"{Path(input_file).name} does not provide the experiment time point. "
         "Enter the numeric time point: "
     ).strip()
     if not entered:
@@ -926,20 +1069,23 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "input_file",
         nargs="?",
-        default=DEFAULT_INPUT_FILE,
-        help=f"Raw .csv, .xlsx, or .xls export (default: {DEFAULT_INPUT_FILE})",
+        help=(
+            "Raw .csv, .xlsx, or .xls export. If omitted, process every "
+            "dataset in datasets/manifest.json."
+        ),
     )
     parser.add_argument(
         "-o",
         "--output",
-        default="parsed_output.csv",
-        help="Accepted-row CSV (default: parsed_output.csv)",
+        help=(
+            "Accepted-row CSV for a single input "
+            f"(default: {DEFAULT_SINGLE_OUTPUT_FILE})"
+        ),
     )
     parser.add_argument(
         "-t",
         "--target",
-        default="C5",
-        help="Target gene to retain, such as C5, C3, or Actin",
+        help="Target gene for a single input (default: C5)",
     )
     parser.add_argument(
         "--time-point",
@@ -974,14 +1120,57 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Permit a header-only accepted CSV",
     )
+    parser.add_argument(
+        "--manifest",
+        default=str(DEFAULT_MANIFEST_FILE),
+        help=(
+            "Dataset manifest used when no input filename is provided "
+            f"(default: {DEFAULT_MANIFEST_FILE})"
+        ),
+    )
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Command-line entry point."""
     arguments = _build_cli_parser().parse_args(argv)
+
+    if arguments.input_file is None:
+        if (
+            arguments.output
+            or arguments.target
+            or arguments.time_point is not None
+            or arguments.salinity
+            or arguments.rejected_output
+        ):
+            logger.error(
+                "Single-file options require an explicit input filename"
+            )
+            return 1
+        try:
+            batch_results = run_dataset_manifest(
+                arguments.manifest,
+                results_sheet=arguments.results_sheet,
+                setup_sheet=arguments.setup_sheet,
+                aggregate_replicates=not arguments.no_aggregate,
+                allow_empty=arguments.allow_empty,
+            )
+        except Exception as exc:
+            logger.error("ASTRA parser failed: %s", exc)
+            return 1
+
+        print("\nASTRA parser batch complete")
+        for batch_result in batch_results:
+            print(
+                f"- {batch_result.job.name}: {len(batch_result.data)} accepted "
+                f"row(s) -> {batch_result.job.output_file}"
+            )
+        return 0
+
+    output_file = Path(arguments.output or DEFAULT_SINGLE_OUTPUT_FILE)
+    target_gene = arguments.target or "C5"
     try:
-        arguments.time_point = _prompt_for_default_workbook_time_point(
+        arguments.time_point = _prompt_for_workbook_time_point(
             arguments.input_file,
             arguments.time_point,
         )
@@ -992,14 +1181,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     rejected_output = (
         Path(arguments.rejected_output)
         if arguments.rejected_output
-        else _default_rejection_path(arguments.output)
+        else _default_rejection_path(output_file)
     )
 
     try:
         result = run_pipeline(
             input_file=arguments.input_file,
-            output_file=arguments.output,
-            target_gene=arguments.target,
+            output_file=output_file,
+            target_gene=target_gene,
             time_point=arguments.time_point,
             salinity=arguments.salinity,
             results_sheet=arguments.results_sheet,
@@ -1014,7 +1203,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print("\nASTRA parser complete")
     print(f"Accepted rows: {len(result)}")
-    print(f"Accepted output: {arguments.output}")
+    print(f"Accepted output: {output_file}")
     print(f"Rejected output: {rejected_output}")
     print(result.to_string(index=False))
     return 0

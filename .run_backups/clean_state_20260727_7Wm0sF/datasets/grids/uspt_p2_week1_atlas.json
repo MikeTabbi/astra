@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "source_file": "/Users/sirmike/Dev2026/astra/datasets/parsed/uspt_p2_week1.csv",
+  "target_name": "PHVUL.001G136100",
+  "row_axis": "salinity",
+  "column_axis": "time_point",
+  "value_column": "fold_change_rq",
+  "aggregation": "mean",
+  "reference_value": 1.0,
+  "legend": {
+    "missing": "#E5E7EB",
+    "reference": "#F7F7F7",
+    "below_reference": "#2166AC",
+    "above_reference": "#B2182B"
+  },
+  "matrix": {
+    "rows": [
+      "High",
+      "Low",
+      "Medium"
+    ],
+    "columns": [
+      168
+    ],
+    "values": [
+      [
+        1925.6626803080242
+      ],
+      [
+        2739.5509929656982
+      ],
+      [
+        9.558459281921388
+      ]
+    ]
+  },
+  "cells": [
+    {
+      "row": "High",
+      "column": 168,
+      "value": 1925.6626803080242,
+      "classification": "above_reference",
+      "color": "#B52234"
+    },
+    {
+      "row": "Low",
+      "column": 168,
+      "value": 2739.5509929656982,
+      "classification": "above_reference",
+      "color": "#B2182B"
+    },
+    {
+      "row": "Medium",
+      "column": 168,
+      "value": 9.558459281921388,
+      "classification": "above_reference",
+      "color": "#E3B7BD"
+    }
+  ]
+}

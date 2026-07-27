@@ -19,6 +19,17 @@ CLAUDE.md
 # Ignore generated output files
 parsed_output.csv
 cleaned_qpcr_data.csv
+consistency_report.json
 *.csv
-# Keep mock_data.csv tracked as your baseline blueprint
-!mock_data.csv
+
+# Keep small example fixtures tracked as parser blueprints
+!datasets/examples/*.csv
+
+# Generated narration reports stay local
+reports/*.json
+
+# Generated expression-atlas files stay local
+datasets/grids/*.json
+
+# Generated synthetic-data reports stay local
+datasets/synthetic/*.json

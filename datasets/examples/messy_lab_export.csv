@@ -1,0 +1,13 @@
+Block Type,QuantStudio 7 Flex
+Experiment File Name,run_2024_03_01.eds
+Instrument Type,QuantStudio
+Software Version,1.7.2
+
+Target Name,Time Point,Salinity,Fold Change,Std Dev,Flag
+C5,0,10,1.02,0.05,
+c5, 6 ,10,2.31,0.11,
+C5,12,10,Undetermined,0.20,NOAMP
+C5,24,10,4.87,,
+C5,48,10,garbage,0.30,EXPFAIL
+GAPDH,0,10,1.00,0.01,
+C5,72, 10 , 6.02 ,0.15,

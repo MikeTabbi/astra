@@ -26,7 +26,7 @@ from typing import Any, Optional, Protocol, Sequence, Union
 
 import pandas as pd
 from ollama import Client
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError
 
 
 PathLike = Union[str, Path]
@@ -34,10 +34,14 @@ PathLike = Union[str, Path]
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
-DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "llama3:latest")
+DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
 DEFAULT_INPUT_FILE = Path("parsed_output.csv")
 DEFAULT_OUTPUT_FILE = Path("consistency_report.json")
+DEFAULT_PARSED_DIRECTORY = PROJECT_ROOT / "datasets" / "parsed"
+DEFAULT_REPORT_DIRECTORY = PROJECT_ROOT / "reports"
+DEFAULT_TARGET_GENE = "auto"
 PROMPT_CHAINS_PATH = Path(__file__).with_name("prompt_chains.json")
 
 MAX_ATTEMPTS = 2
@@ -75,6 +79,7 @@ class DatasetFacts(BaseModel):
     row_count: int = Field(ge=1)
     time_points: list[float] = Field(min_length=1)
     salinity_conditions: list[str] = Field(min_length=1)
+    condition_means: dict[str, float] = Field(min_length=1)
     fold_change_min: float
     fold_change_max: float
     fold_change_mean: float
@@ -82,10 +87,14 @@ class DatasetFacts(BaseModel):
     peak_time_point: float
     peak_salinity: str
     peak_fold_change_rq: float = Field(ge=0)
+    highest_mean_salinity: str
+    highest_mean_fold_change_rq: float = Field(ge=0)
 
 
 class NarrativeSummary(BaseModel):
     """Pydantic-enforced response contract for one model narration."""
+
+    _generated_text: str = PrivateAttr(default="")
 
     target_name: str = Field(description="Target gene summarized by this response.")
     headline: str = Field(description="One-sentence takeaway grounded in the data.")
@@ -105,6 +114,13 @@ class NarrativeSummary(BaseModel):
     peak_fold_change_rq: float = Field(
         ge=0,
         description="Maximum fold_change_rq present in the source table.",
+    )
+    highest_mean_salinity: str = Field(
+        description="Condition with the highest mean fold_change_rq."
+    )
+    highest_mean_fold_change_rq: float = Field(
+        ge=0,
+        description="Mean fold_change_rq for highest_mean_salinity.",
     )
     confidence_note: str = Field(
         description=(
@@ -134,6 +150,10 @@ class NarrativeSummary(BaseModel):
             self.peak_salinity.strip().casefold(),
             round(float(self.peak_fold_change_rq), 6),
         )
+
+    def consistency_text(self) -> str:
+        """Return the original validated model wording for consistency scoring."""
+        return self._generated_text or self.as_text()
 
 
 class InferenceProvider(Protocol):
@@ -236,14 +256,18 @@ def load_prompt_chains(path: Path = PROMPT_CHAINS_PATH) -> dict[str, str]:
             "- fold_change_rq is relative expression.\n"
             "- variance_sd is technical-replicate standard deviation.\n\n"
             "Each row is a cleaned sample-level result after parser QC and "
-            "technical-replicate aggregation. Say 'higher measured fold change' "
-            "or 'lower measured fold change' when comparing values. Do not infer "
-            "a biological-replicate count.\n\n"
+            "technical-replicate aggregation. Keep the strongest individual "
+            "measurement separate from the condition with the highest mean. "
+            "When discussing conditions, report their calculated means instead "
+            "of writing free-form higher/lower comparisons. Every superlative "
+            "must explicitly say either 'condition mean' or 'individual "
+            "measurement'. Do not infer a biological-replicate count.\n\n"
             "Clean parser output:\n{data_table}\n\n"
             "Deterministic facts calculated in Python:\n{stats}\n\n"
-            "Your structured peak fields must exactly match the deterministic peak. "
-            "Describe uncertainty cautiously; consistency is not scientific "
-            "confidence. Return ONLY valid JSON matching this schema:\n{schema}\n"
+            "Your structured peak fields and highest-condition-mean fields must "
+            "exactly match the deterministic facts. Describe uncertainty "
+            "cautiously; consistency is not scientific confidence. Return ONLY "
+            "valid JSON matching this schema:\n{schema}\n"
             "Do not use markdown fences or add prose outside the JSON."
         )
     }
@@ -254,10 +278,31 @@ def _invalid_row_numbers(mask: pd.Series) -> list[int]:
     return [int(index) + 2 for index in mask[mask].index]
 
 
+def _resolve_target_name(dataframe: pd.DataFrame, target_gene: str) -> str:
+    """Resolve ``auto`` to the single target present in parser output."""
+    available = sorted(
+        {
+            str(value).strip()
+            for value in dataframe["target_name"].dropna().astype(str)
+            if value.strip()
+        },
+        key=str.casefold,
+    )
+    requested = target_gene.strip()
+    if requested.casefold() != DEFAULT_TARGET_GENE.casefold():
+        return requested
+    if len(available) != 1:
+        raise ValueError(
+            "Automatic target detection requires exactly one target; "
+            f"available targets: {', '.join(available) or '<none>'}"
+        )
+    return available[0]
+
+
 def validate_parser_dataframe(
     dataframe: pd.DataFrame,
     *,
-    target_gene: str = "C5",
+    target_gene: str = DEFAULT_TARGET_GENE,
 ) -> pd.DataFrame:
     """Validate and isolate one target from parser.py's five-column contract."""
     missing = [
@@ -307,7 +352,7 @@ def validate_parser_dataframe(
                 f"{_invalid_row_numbers(invalid)}"
             )
 
-    requested_target = target_gene.strip()
+    requested_target = _resolve_target_name(data, target_gene)
     target_mask = data["target_name"].str.casefold().eq(requested_target.casefold())
     data = data.loc[target_mask].copy()
     if data.empty:
@@ -324,14 +369,14 @@ def validate_parser_dataframe(
             f"Available targets: {', '.join(available) or '<none>'}"
         )
 
-    data["target_name"] = requested_target.upper()
+    data["target_name"] = requested_target
     return data.reset_index(drop=True)
 
 
 def load_parser_output(
     input_file: PathLike = DEFAULT_INPUT_FILE,
     *,
-    target_gene: str = "C5",
+    target_gene: str = DEFAULT_TARGET_GENE,
 ) -> pd.DataFrame:
     """Read and validate the clean CSV produced by parser.py."""
     path = Path(input_file)
@@ -345,7 +390,7 @@ def load_parser_output(
 def compute_dataset_facts(
     dataframe: pd.DataFrame,
     *,
-    target_gene: str = "C5",
+    target_gene: str = DEFAULT_TARGET_GENE,
 ) -> DatasetFacts:
     """Calculate the factual values the model is required to preserve."""
     data = validate_parser_dataframe(dataframe, target_gene=target_gene)
@@ -355,11 +400,23 @@ def compute_dataset_facts(
         {str(value) for value in data["salinity"]},
         key=str.casefold,
     )
+    condition_means = {
+        str(condition): float(mean)
+        for condition, mean in data.groupby("salinity", sort=True)[
+            "fold_change_rq"
+        ].mean().items()
+    }
+    highest_mean_salinity = max(
+        condition_means,
+        key=lambda condition: condition_means[condition],
+    )
+    resolved_target = str(data.iloc[0]["target_name"])
     return DatasetFacts(
-        target_name=target_gene.strip().upper(),
+        target_name=resolved_target,
         row_count=len(data),
         time_points=time_points,
         salinity_conditions=salinity_conditions,
+        condition_means=condition_means,
         fold_change_min=float(data["fold_change_rq"].min()),
         fold_change_max=float(data["fold_change_rq"].max()),
         fold_change_mean=float(data["fold_change_rq"].mean()),
@@ -367,6 +424,8 @@ def compute_dataset_facts(
         peak_time_point=float(peak["time_point"]),
         peak_salinity=str(peak["salinity"]),
         peak_fold_change_rq=float(peak["fold_change_rq"]),
+        highest_mean_salinity=highest_mean_salinity,
+        highest_mean_fold_change_rq=condition_means[highest_mean_salinity],
     )
 
 
@@ -374,10 +433,18 @@ def _display_number(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else f"{value:g}"
 
 
+def _condition_means_text(facts: DatasetFacts) -> str:
+    """Render condition means in a stable, auditable order."""
+    return ", ".join(
+        f"{condition}={mean:.3f}"
+        for condition, mean in facts.condition_means.items()
+    )
+
+
 def _summarize_dataframe(
     dataframe: pd.DataFrame,
     *,
-    target_gene: str = "C5",
+    target_gene: str = DEFAULT_TARGET_GENE,
 ) -> str:
     """Create a compact, deterministic fact block for the model prompt."""
     facts = compute_dataset_facts(dataframe, target_gene=target_gene)
@@ -394,6 +461,8 @@ def _summarize_dataframe(
         f"- measured peak: {facts.peak_fold_change_rq:.3f} at "
         f"time_point={_display_number(facts.peak_time_point)}, "
         f"salinity={facts.peak_salinity}\n"
+        f"- highest condition mean: {facts.highest_mean_fold_change_rq:.3f} "
+        f"for salinity={facts.highest_mean_salinity}\n"
         f"- mean variance_sd: {facts.variance_sd_mean:.3f}\n"
     ]
     if len(facts.time_points) == 1:
@@ -415,14 +484,15 @@ def _summarize_dataframe(
 
 def build_prompt(
     dataframe: pd.DataFrame,
-    target_gene: str = "C5",
+    target_gene: str = DEFAULT_TARGET_GENE,
     chains: Optional[dict[str, str]] = None,
 ) -> str:
     """Build a prompt from validated parser rows and deterministic facts."""
     data = validate_parser_dataframe(dataframe, target_gene=target_gene)
+    facts = compute_dataset_facts(data, target_gene=target_gene)
     chains = chains or load_prompt_chains()
     return chains["narrate"].format(
-        target_gene=target_gene.strip().upper(),
+        target_gene=facts.target_name,
         data_table=data.to_csv(index=False),
         stats=_summarize_dataframe(data, target_gene=target_gene),
         schema=json.dumps(NarrativeSummary.model_json_schema(), indent=2),
@@ -464,6 +534,25 @@ def _validate_summary_facts(
             f"peak_fold_change_rq={summary.peak_fold_change_rq}, "
             f"expected {facts.peak_fold_change_rq}"
         )
+    if (
+        summary.highest_mean_salinity.strip().casefold()
+        != facts.highest_mean_salinity.casefold()
+    ):
+        errors.append(
+            f"highest_mean_salinity={summary.highest_mean_salinity!r}, "
+            f"expected {facts.highest_mean_salinity!r}"
+        )
+    if not math.isclose(
+        float(summary.highest_mean_fold_change_rq),
+        facts.highest_mean_fold_change_rq,
+        rel_tol=0,
+        abs_tol=PEAK_RQ_ABS_TOLERANCE,
+    ):
+        errors.append(
+            "highest_mean_fold_change_rq="
+            f"{summary.highest_mean_fold_change_rq}, "
+            f"expected {facts.highest_mean_fold_change_rq}"
+        )
     if " ppt" in summary.as_text().casefold():
         errors.append("narrative treats categorical salinity labels as numeric ppt")
 
@@ -476,11 +565,43 @@ def _normalize_deterministic_fields(
     facts: DatasetFacts,
 ) -> NarrativeSummary:
     """Replace factual prose fields with values calculated directly in Python."""
+    summary.headline = (
+        f"{facts.target_name} had the highest mean measured fold change in the "
+        f"{facts.highest_mean_salinity} condition "
+        f"({facts.highest_mean_fold_change_rq:.3f})."
+    )
     summary.peak_condition = (
-        f"The strongest measured C5 response was "
+        f"The strongest measured {facts.target_name} response was "
         f"{facts.peak_fold_change_rq:.3f} in the {facts.peak_salinity} condition "
         f"at time point {_display_number(facts.peak_time_point)}."
     )
+    summary.highest_mean_salinity = facts.highest_mean_salinity
+    summary.highest_mean_fold_change_rq = facts.highest_mean_fold_change_rq
+    condition_means = _condition_means_text(facts)
+    if len(facts.time_points) == 1:
+        summary.trend_description = (
+            "Only one measured time point "
+            f"({_display_number(facts.time_points[0])}) is represented, so no "
+            "time-course trend can be inferred. Mean measured fold change by "
+            f"condition: {condition_means}."
+        )
+    else:
+        summary.trend_description = (
+            "Mean measured fold change across accepted rows by condition: "
+            f"{condition_means}. Multiple time points are represented; this "
+            "descriptive summary does not perform time-course modeling."
+        )
+    summary.key_observations = [
+        f"The highest condition mean was {facts.highest_mean_fold_change_rq:.3f} "
+        f"in {facts.highest_mean_salinity}.",
+        f"The strongest individual measurement was "
+        f"{facts.peak_fold_change_rq:.3f} in {facts.peak_salinity} at time point "
+        f"{_display_number(facts.peak_time_point)}.",
+    ]
+    if len(facts.time_points) == 1:
+        summary.key_observations.append(
+            "Only one measured time point is available."
+        )
     coverage = (
         "Only one time point is represented, so this report cannot describe a "
         "time-course trend. "
@@ -516,7 +637,7 @@ def _validate_narrative_language(summary: NarrativeSummary) -> None:
 
 def narrate(
     dataframe: pd.DataFrame,
-    target_gene: str = "C5",
+    target_gene: str = DEFAULT_TARGET_GENE,
     *,
     provider: Optional[InferenceProvider] = None,
     model: str = DEFAULT_MODEL,
@@ -529,6 +650,7 @@ def narrate(
     prompt = build_prompt(data, target_gene)
     schema = NarrativeSummary.model_json_schema()
     last_error: Optional[Exception] = None
+    attempt_errors: list[str] = []
     attempt_prompt = prompt
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -542,9 +664,11 @@ def narrate(
             summary = NarrativeSummary.model_validate_json(content)
             _validate_summary_facts(summary, facts)
             _validate_narrative_language(summary)
+            summary._generated_text = summary.as_text()
             return _normalize_deterministic_fields(summary, facts)
         except (ValidationError, ValueError) as exc:
             last_error = exc
+            attempt_errors.append(f"attempt {attempt}: {exc}")
             logger.warning(
                 "Narration attempt %d/%d failed validation: %s",
                 attempt,
@@ -558,8 +682,8 @@ def narrate(
             )
 
     raise ValueError(
-        f"Model returned invalid or factually inconsistent output on all "
-        f"{MAX_ATTEMPTS} attempts"
+        "Model returned invalid or factually inconsistent output on all "
+        f"{MAX_ATTEMPTS} attempts. " + " | ".join(attempt_errors)
     ) from last_error
 
 
@@ -578,9 +702,51 @@ def _pairwise_similarities(texts: list[str]) -> list[float]:
     return scores
 
 
+def _rate_consistency(
+    *,
+    success_rate: float,
+    successful_runs: int,
+    mean_similarity: Optional[float],
+    peak_agreement: Optional[float],
+) -> tuple[str, list[str]]:
+    """Assign a generation-consistency rating with explicit reasons."""
+    reasons: list[str] = []
+    if success_rate < 0.8:
+        reasons.append(
+            f"Only {success_rate:.0%} of requested runs passed validation; "
+            "at least 80% is required for MODERATE or HIGH."
+        )
+    if successful_runs < 2:
+        reasons.append(
+            "Fewer than two runs passed, so cross-run similarity is unavailable."
+        )
+    if peak_agreement is not None and peak_agreement < 1.0:
+        reasons.append("Validated runs did not fully agree on the measured peak.")
+    if mean_similarity is not None and mean_similarity < 0.65:
+        reasons.append(
+            f"Mean wording similarity was {mean_similarity:.3f}, below 0.650."
+        )
+
+    if reasons:
+        return "low", reasons
+    if (
+        success_rate == 1.0
+        and mean_similarity is not None
+        and mean_similarity >= 0.85
+    ):
+        return "high", [
+            "All requested runs passed validation, peak agreement was complete, "
+            "and mean wording similarity was at least 0.850."
+        ]
+    return "moderate", [
+        "At least 80% of runs passed validation with complete peak agreement, "
+        "but the HIGH threshold was not met."
+    ]
+
+
 def check_consistency(
     dataframe: pd.DataFrame,
-    target_gene: str = "C5",
+    target_gene: str = DEFAULT_TARGET_GENE,
     runs: int = CONSISTENCY_RUNS,
     *,
     provider: Optional[InferenceProvider] = None,
@@ -595,7 +761,7 @@ def check_consistency(
     facts = compute_dataset_facts(data, target_gene=target_gene)
     provider = provider or OllamaInferenceProvider()
     summaries: list[NarrativeSummary] = []
-    failures = 0
+    failure_details: list[dict[str, Any]] = []
 
     for run in range(1, runs + 1):
         logger.info("Consistency run %d/%d", run, runs)
@@ -610,54 +776,84 @@ def check_consistency(
                 )
             )
         except (ValueError, RuntimeError) as exc:
-            failures += 1
+            failure_details.append(
+                {
+                    "run": run,
+                    "error_type": type(exc).__name__,
+                    "reason": str(exc),
+                }
+            )
             logger.error("Consistency run %d failed: %s", run, exc)
 
-    if len(summaries) < 2:
-        raise ValueError(
-            "Need at least 2 successful runs to measure consistency; "
-            f"got {len(summaries)}"
+    texts = [summary.consistency_text() for summary in summaries]
+    scores = _pairwise_similarities(texts) if len(texts) >= 2 else []
+    if scores:
+        mean_similarity: Optional[float] = statistics.mean(scores)
+        stdev_similarity: Optional[float] = (
+            statistics.stdev(scores) if len(scores) > 1 else 0.0
         )
-
-    texts = [summary.as_text() for summary in summaries]
-    scores = _pairwise_similarities(texts)
-    mean_similarity = statistics.mean(scores)
-    stdev_similarity = statistics.stdev(scores) if len(scores) > 1 else 0.0
-
-    peak_keys = [summary.peak_key() for summary in summaries]
-    most_common_peak = max(set(peak_keys), key=peak_keys.count)
-    peak_agreement = peak_keys.count(most_common_peak) / len(peak_keys)
-
-    if peak_agreement < 1.0 or mean_similarity < 0.65:
-        rating = "low"
-    elif mean_similarity >= 0.85:
-        rating = "high"
+        min_similarity: Optional[float] = min(scores)
+        max_similarity: Optional[float] = max(scores)
     else:
-        rating = "moderate"
+        mean_similarity = None
+        stdev_similarity = None
+        min_similarity = None
+        max_similarity = None
+
+    if len(summaries) >= 2:
+        peak_keys = [summary.peak_key() for summary in summaries]
+        most_common_peak = max(set(peak_keys), key=peak_keys.count)
+        peak_agreement: Optional[float] = (
+            peak_keys.count(most_common_peak) / len(peak_keys)
+        )
+    else:
+        peak_agreement = None
+
+    success_rate = len(summaries) / runs
+    rating, rating_reasons = _rate_consistency(
+        success_rate=success_rate,
+        successful_runs=len(summaries),
+        mean_similarity=mean_similarity,
+        peak_agreement=peak_agreement,
+    )
 
     report: dict[str, Any] = {
         "input_schema": PARSER_SCHEMA_COLUMNS,
         "dataset_facts": facts.model_dump(),
         "runs_requested": runs,
         "runs_succeeded": len(summaries),
-        "runs_failed": failures,
-        "mean_similarity": round(mean_similarity, 4),
-        "stdev_similarity": round(stdev_similarity, 4),
-        "min_similarity": round(min(scores), 4),
-        "max_similarity": round(max(scores), 4),
-        "reliability_rating": rating,
-        "reliability_scope": (
-            "Generation consistency only; this is not statistical confidence "
-            "or biological validation."
+        "runs_failed": len(failure_details),
+        "success_rate": round(success_rate, 4),
+        "failure_details": failure_details,
+        "mean_similarity": (
+            round(mean_similarity, 4) if mean_similarity is not None else None
         ),
-        "peak_condition_agreement": round(peak_agreement, 4),
+        "stdev_similarity": (
+            round(stdev_similarity, 4) if stdev_similarity is not None else None
+        ),
+        "min_similarity": (
+            round(min_similarity, 4) if min_similarity is not None else None
+        ),
+        "max_similarity": (
+            round(max_similarity, 4) if max_similarity is not None else None
+        ),
+        "reliability_rating": rating,
+        "rating_reasons": rating_reasons,
+        "reliability_scope": (
+            "Validated generation consistency only; this rating incorporates "
+            "validation success rate, peak agreement, and wording similarity. "
+            "It is not statistical confidence or biological validation."
+        ),
+        "peak_condition_agreement": (
+            round(peak_agreement, 4) if peak_agreement is not None else None
+        ),
         "summaries": [summary.model_dump() for summary in summaries],
     }
     logger.info(
-        "Consistency: mean=%.3f stdev=%.3f peak_agreement=%.3f rating=%s",
-        mean_similarity,
-        stdev_similarity,
-        peak_agreement,
+        "Consistency: success_rate=%.3f mean=%s peak_agreement=%s rating=%s",
+        success_rate,
+        f"{mean_similarity:.3f}" if mean_similarity is not None else "n/a",
+        f"{peak_agreement:.3f}" if peak_agreement is not None else "n/a",
         rating,
     )
     return report
@@ -666,7 +862,7 @@ def check_consistency(
 def run_consistency_report(
     input_file: PathLike = DEFAULT_INPUT_FILE,
     output_file: PathLike = DEFAULT_OUTPUT_FILE,
-    target_gene: str = "C5",
+    target_gene: str = DEFAULT_TARGET_GENE,
     runs: int = CONSISTENCY_RUNS,
     *,
     provider: Optional[InferenceProvider] = None,
@@ -692,6 +888,62 @@ def run_consistency_report(
     return report
 
 
+def discover_parser_outputs(
+    parsed_directory: PathLike = DEFAULT_PARSED_DIRECTORY,
+) -> list[Path]:
+    """Find accepted parser CSVs while excluding rejection reports."""
+    directory = Path(parsed_directory)
+    if not directory.is_dir():
+        raise FileNotFoundError(
+            f"Parsed-data directory not found: {directory}. Run parser.py first."
+        )
+    outputs = sorted(
+        (
+            path
+            for path in directory.glob("*.csv")
+            if not path.stem.endswith("_rejected")
+        ),
+        key=lambda path: path.name.casefold(),
+    )
+    if not outputs:
+        raise FileNotFoundError(
+            f"No accepted parser CSVs found in {directory}. Run parser.py first."
+        )
+    return outputs
+
+
+def run_report_batch(
+    parsed_directory: PathLike = DEFAULT_PARSED_DIRECTORY,
+    report_directory: PathLike = DEFAULT_REPORT_DIRECTORY,
+    runs: int = CONSISTENCY_RUNS,
+    *,
+    provider: Optional[InferenceProvider] = None,
+    model: str = DEFAULT_MODEL,
+    temperature: float = 0.2,
+) -> list[tuple[Path, Path, dict[str, Any]]]:
+    """Narrate every accepted CSV produced by the no-argument parser run."""
+    parsed_files = discover_parser_outputs(parsed_directory)
+    report_directory = Path(report_directory)
+    provider = provider or OllamaInferenceProvider()
+    completed: list[tuple[Path, Path, dict[str, Any]]] = []
+    for input_path in parsed_files:
+        output_path = (
+            report_directory / f"{input_path.stem}_consistency_report.json"
+        )
+        logger.info("Narrating parser output %s", input_path)
+        report = run_consistency_report(
+            input_file=input_path,
+            output_file=output_path,
+            target_gene=DEFAULT_TARGET_GENE,
+            runs=runs,
+            provider=provider,
+            model=model,
+            temperature=temperature,
+        )
+        completed.append((input_path, output_path, report))
+    return completed
+
+
 def _build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Narrate the clean five-column CSV produced by parser.py."
@@ -699,20 +951,24 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "input_file",
         nargs="?",
-        default=str(DEFAULT_INPUT_FILE),
-        help=f"Parser output CSV (default: {DEFAULT_INPUT_FILE})",
+        help=(
+            "Parser output CSV. If omitted, narrate every accepted CSV in "
+            "datasets/parsed."
+        ),
     )
     parser.add_argument(
         "-o",
         "--output",
-        default=str(DEFAULT_OUTPUT_FILE),
-        help=f"JSON report path (default: {DEFAULT_OUTPUT_FILE})",
+        help=(
+            "JSON report path for a single input "
+            f"(default: {DEFAULT_OUTPUT_FILE})"
+        ),
     )
     parser.add_argument(
         "-t",
         "--target",
-        default="C5",
-        help="Target gene to narrate (default: C5)",
+        default=DEFAULT_TARGET_GENE,
+        help="Target gene to narrate (default: detect the CSV's only target)",
     )
     parser.add_argument(
         "--runs",
@@ -736,17 +992,61 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         default=0.2,
         help="Model generation temperature (default: 0.2)",
     )
+    parser.add_argument(
+        "--parsed-dir",
+        default=str(DEFAULT_PARSED_DIRECTORY),
+        help=(
+            "Parsed CSV directory used when no input filename is supplied "
+            f"(default: {DEFAULT_PARSED_DIRECTORY})"
+        ),
+    )
+    parser.add_argument(
+        "--report-dir",
+        default=str(DEFAULT_REPORT_DIRECTORY),
+        help=(
+            "Batch JSON report directory "
+            f"(default: {DEFAULT_REPORT_DIRECTORY})"
+        ),
+    )
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Command-line entry point."""
     arguments = _build_cli_parser().parse_args(argv)
+
+    if arguments.input_file is None and (
+        arguments.output
+        or arguments.target.casefold() != DEFAULT_TARGET_GENE.casefold()
+    ):
+        logger.error("--output and --target require an explicit input CSV")
+        return 1
+
     try:
         provider = OllamaInferenceProvider(host=arguments.host)
+        if arguments.input_file is None:
+            completed = run_report_batch(
+                parsed_directory=arguments.parsed_dir,
+                report_directory=arguments.report_dir,
+                runs=arguments.runs,
+                provider=provider,
+                model=arguments.model,
+                temperature=arguments.temperature,
+            )
+            print("\nASTRA narrator batch complete")
+            for input_path, output_path, report in completed:
+                print(
+                    f"- {input_path.name}: "
+                    f"{report['runs_succeeded']}/{report['runs_requested']} "
+                    f"successful run(s), "
+                    f"{report['reliability_rating'].upper()} -> {output_path}"
+                )
+            return 0
+
+        output_file = Path(arguments.output or DEFAULT_OUTPUT_FILE)
         report = run_consistency_report(
             input_file=arguments.input_file,
-            output_file=arguments.output,
+            output_file=output_file,
             target_gene=arguments.target,
             runs=arguments.runs,
             provider=provider,
@@ -762,9 +1062,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Consistency rating: {report['reliability_rating'].upper()}")
     print(f"Mean wording similarity: {report['mean_similarity']}")
     print(f"Peak agreement: {report['peak_condition_agreement']}")
-    print(f"Report: {arguments.output}")
-    print("\nValidated sample summary:")
-    print(json.dumps(report["summaries"][0], indent=2))
+    print(f"Report: {output_file}")
+    print("Rating reason(s):")
+    for reason in report["rating_reasons"]:
+        print(f"- {reason}")
+    if report["summaries"]:
+        print("\nValidated sample summary:")
+        print(json.dumps(report["summaries"][0], indent=2))
+    else:
+        print("\nNo model output passed validation; see failure_details in the report.")
     return 0
 
 
